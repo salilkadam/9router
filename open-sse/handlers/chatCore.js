@@ -101,7 +101,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
   const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
-  let stream = providerRequiresStreaming ? true : (body.stream !== false);
+  // `stream` is OPTIONAL in the OpenAI spec and defaults to FALSE. This used to
+  // read `body.stream !== false`, i.e. absent meant STREAM, which is backwards:
+  // a client that simply omitted the field got Content-Type: text/event-stream
+  // carrying a bare JSON object followed by "data: [DONE]" -- neither valid
+  // JSON nor valid SSE.
+  //
+  // Only clients sending `Accept: application/json` escaped it, via the
+  // clientPrefersJson branch below. `Accept: */*` -- curl, most HTTP libraries,
+  // several SDKs -- did not, so they would have started receiving unparseable
+  // responses the moment this router took over an endpoint that previously
+  // honoured the default.
+  //
+  // Explicit `stream: true` is unaffected and still streams, on every tier.
+  let stream = providerRequiresStreaming ? true : (body.stream === true);
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
   const modelType = getModelType(alias, model);
