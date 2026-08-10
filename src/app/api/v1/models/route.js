@@ -533,15 +533,67 @@ export async function OPTIONS() {
   });
 }
 
+// Optional passthrough catalogue.
+//
+// This endpoint is LLM-only by design (other kinds live at /v1/models/{kind}).
+// That is a problem when 9Router sits behind a gateway that ALSO fronts a
+// multi-modal upstream on the same base URL: callers list /v1/models and
+// legitimately expect everything reachable at that URL, including the TTS, STT
+// and embedding models this router does not route.
+//
+// Set UPSTREAM_MODELS_URL to that upstream's /v1/models to have its entries
+// merged in. Anything already advertised here wins, so the router's own ids
+// (and its combo names) are never shadowed. Unset = upstream behaviour,
+// unchanged.
+const UPSTREAM_MODELS_TTL_MS = 60_000;
+let _upstreamCache = { at: 0, data: [] };
+
+async function fetchUpstreamModels() {
+  const url = process.env.UPSTREAM_MODELS_URL;
+  if (!url) return [];
+  if (Date.now() - _upstreamCache.at < UPSTREAM_MODELS_TTL_MS) return _upstreamCache.data;
+  try {
+    const res = await fetch(url, {
+      // Same guard the router uses against another 9router: harmless to a
+      // non-9router upstream, and prevents a loop if this ever points at one.
+      headers: { [INTERNAL_MODELS_FETCH_HEADER]: "1" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return _upstreamCache.data;
+    const json = await res.json();
+    const data = Array.isArray(json?.data) ? json.data : [];
+    _upstreamCache = { at: Date.now(), data };
+    return data;
+  } catch {
+    // Discovery must not fail because the upstream is briefly unreachable;
+    // serve the last good list, or nothing.
+    return _upstreamCache.data;
+  }
+}
+
 /**
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
+ * When UPSTREAM_MODELS_URL is set, that upstream's catalogue is merged in.
  */
 export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
     const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+
+    if (!skipDynamicFetch) {
+      const known = new Set(data.map((m) => m.id));
+      // Prefixed ids (gpu/qwen...) already cover the bare upstream id, so match
+      // on the suffix too or every model would be listed twice.
+      for (const id of [...known]) {
+        if (id.includes("/")) known.add(id.slice(id.indexOf("/") + 1));
+      }
+      for (const m of await fetchUpstreamModels()) {
+        if (m?.id && !known.has(m.id)) data.push({ ...m, owned_by: m.owned_by || "upstream" });
+      }
+    }
+
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
