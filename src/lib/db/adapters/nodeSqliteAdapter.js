@@ -1,5 +1,6 @@
 // Built-in node:sqlite adapter — available in Node >= 22.5.0.
 // No native build, no npm install. API mirrors betterSqliteAdapter.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { PRAGMA_SQL } from "../schema.js";
 
 const CHECKPOINT_INTERVAL_MS = 60 * 1000;
@@ -48,8 +49,12 @@ export async function createNodeSqliteAdapter(filePath) {
   process.once("SIGINT", () => { onShutdown(); process.exit(0); });
   process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
 
+  const txAls = new AsyncLocalStorage();
+  let txTail = Promise.resolve();
+
   return {
     driver: "node:sqlite",
+    dialect: "sqlite",
     run(sql, params = []) {
       const r = prepare(sql).run(...params);
       return { changes: Number(r.changes ?? 0), lastInsertRowid: Number(r.lastInsertRowid ?? 0) };
@@ -61,18 +66,29 @@ export async function createNodeSqliteAdapter(filePath) {
       return prepare(sql).all(...params);
     },
     exec(sql) { return db.exec(sql); },
-    transaction(fn) {
-      // node:sqlite has no transaction wrapper. Use SAVEPOINT for nested support.
-      const sp = `sp_${Math.random().toString(36).slice(2)}`;
-      db.exec(`SAVEPOINT ${sp}`);
-      try {
-        const r = fn();
-        db.exec(`RELEASE ${sp}`);
-        return r;
-      } catch (e) {
-        try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
-        throw e;
-      }
+    // Serialized via a promise-chain mutex: async callbacks yield mid-tx, so
+    // concurrent transactions would interleave savepoints on the shared
+    // connection. Nested transaction() calls join the outer one.
+    async transaction(fn) {
+      if (txAls.getStore()) return fn();
+      const task = async () => {
+        const sp = `sp_${Math.random().toString(36).slice(2)}`;
+        db.exec(`SAVEPOINT ${sp}`);
+        try {
+          const r = await txAls.run(true, fn);
+          db.exec(`RELEASE ${sp}`);
+          return r;
+        } catch (e) {
+          try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
+          throw e;
+        }
+      };
+      const p = txTail.then(task, task);
+      txTail = p.then(() => {}, () => {});
+      return p;
+    },
+    tableColumns(tableName) {
+      return prepare(`PRAGMA table_info(${tableName})`).all().map((r) => r.name);
     },
     checkpoint() { try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} },
     close() {

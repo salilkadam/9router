@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import initSqlJs from "sql.js";
 import { PRAGMA_SQL } from "../schema.js";
 
@@ -85,18 +86,32 @@ export async function createSqlJsAdapter(filePath) {
     scheduleSave();
   }
 
-  function transaction(fn) {
-    const sp = `sp_${Math.random().toString(36).slice(2)}`;
-    db.exec(`SAVEPOINT ${sp}`);
-    try {
-      const result = fn();
-      db.exec(`RELEASE ${sp}`);
-      scheduleSave();
-      return result;
-    } catch (e) {
-      try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
-      throw e;
-    }
+  // Serialized via a promise-chain mutex: async callbacks yield mid-tx, so
+  // concurrent transactions would interleave savepoints. Nested calls join.
+  const txAls = new AsyncLocalStorage();
+  let txTail = Promise.resolve();
+  async function transaction(fn) {
+    if (txAls.getStore()) return fn();
+    const task = async () => {
+      const sp = `sp_${Math.random().toString(36).slice(2)}`;
+      db.exec(`SAVEPOINT ${sp}`);
+      try {
+        const result = await txAls.run(true, fn);
+        db.exec(`RELEASE ${sp}`);
+        scheduleSave();
+        return result;
+      } catch (e) {
+        try { db.exec(`ROLLBACK TO ${sp}`); db.exec(`RELEASE ${sp}`); } catch {}
+        throw e;
+      }
+    };
+    const p = txTail.then(task, task);
+    txTail = p.then(() => {}, () => {});
+    return p;
+  }
+
+  function tableColumns(tableName) {
+    return all(`PRAGMA table_info(${tableName})`).map((r) => r.name);
   }
 
   function close() {
@@ -111,5 +126,5 @@ export async function createSqlJsAdapter(filePath) {
   process.on("SIGINT", flush);
   process.on("SIGTERM", flush);
 
-  return { driver: "sql.js", run, get, all, exec, transaction, close, raw: db };
+  return { driver: "sql.js", dialect: "sqlite", run, get, all, exec, transaction, tableColumns, checkpoint() {}, close, raw: db };
 }

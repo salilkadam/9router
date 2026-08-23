@@ -52,19 +52,33 @@ async function trySqlJs() {
   }
 }
 
+async function tryPostgres() {
+  if (!process.env.DATABASE_URL) return null;
+  try {
+    const { createPgAdapter } = await import("./adapters/pgAdapter.js");
+    return await createPgAdapter(process.env.DATABASE_URL);
+  } catch (e) {
+    // No silent fallback to SQLite: an explicitly configured DATABASE_URL that
+    // doesn't work must fail loudly, not quietly run against an empty local db.
+    throw new Error(`[DB] DATABASE_URL is set but Postgres init failed: ${e.message}`);
+  }
+}
+
 async function initAdapter() {
   ensureDirs();
   // Order per runtime:
+  //   DATABASE_URL set → Postgres (no fallback)
   //   Bun:  bun:sqlite → sql.js
   //   Node: better-sqlite3 → node:sqlite (≥22.5) → sql.js
-  let adapter = await tryBunSqlite();
+  let adapter = await tryPostgres();
+  if (!adapter) adapter = await tryBunSqlite();
   if (!adapter) adapter = await tryBetterSqlite();
   if (!adapter) adapter = await tryNodeSqlite();
   if (!adapter) adapter = await trySqlJs();
   if (!adapter) throw new Error("[DB] No SQLite driver available (bun/better/node/sql.js all failed)");
 
   if (!state.logged) {
-    console.log(`[DB] Driver: ${adapter.driver} | file: ${DATA_FILE}`);
+    console.log(`[DB] Driver: ${adapter.driver} | ${adapter.dialect === "postgres" ? "url: DATABASE_URL" : `file: ${DATA_FILE}`}`);
     state.logged = true;
   }
 

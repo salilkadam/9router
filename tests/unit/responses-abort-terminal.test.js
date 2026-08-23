@@ -67,6 +67,30 @@ describe("Responses abort terminal synthesis", () => {
 
     const text = await readAll(out);
     expect(text).not.toContain("response.failed");
-    expect(text).not.toContain("[DONE]");
+    // Nothing was delivered downstream (error discards the queued bytes), so a
+    // terminal error chunk + [DONE] is synthesized instead of a silent empty close.
+    expect(text).toContain("Upstream connection failed before any data was received");
+    expect(text).toContain("[DONE]");
+  });
+
+  it("does not inject an error when bytes were already delivered", async () => {
+    let sent;
+    const upstream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: hi\n\n"));
+        sent = () => controller.error(new Error("socket hang up"));
+      },
+      pull() { sent?.(); },
+    });
+
+    const out = createDisconnectAwareStream(
+      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+      makeController(),
+      null
+    );
+
+    const text = await readAll(out);
+    expect(text).toContain("data: hi");
+    expect(text).not.toContain("Upstream connection failed");
   });
 });

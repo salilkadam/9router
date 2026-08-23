@@ -35,6 +35,10 @@ COPY --from=builder /app/open-sse ./open-sse
 COPY --from=builder /app/src/mitm ./src/mitm
 # Standalone node_modules may omit deps only required by the MITM child process.
 COPY --from=builder /app/node_modules/node-forge ./node_modules/node-forge
+# One-time SQLite → Postgres migration script + the alias-free db modules it
+# imports (run via: node scripts/migrate-sqlite-to-pg.mjs).
+COPY --from=builder /app/scripts/migrate-sqlite-to-pg.mjs ./scripts/migrate-sqlite-to-pg.mjs
+COPY --from=builder /app/src/lib/db ./src/lib/db
 # Ensure `next` is available at runtime in case tracing did not include it.
 COPY --from=builder /app/node_modules/next ./node_modules/next
 

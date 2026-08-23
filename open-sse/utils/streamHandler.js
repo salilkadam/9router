@@ -99,6 +99,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
   let terminalEmitted = false;
+  let bytesEnqueued = false;
 
   // Emit a synthesized terminal payload (e.g. Responses response.failed + [DONE]) once
   const emitTerminal = (controller) => {
@@ -127,6 +128,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
           return;
         }
         controller.enqueue(value);
+        bytesEnqueued = true;
       } catch (error) {
         const wasConnected = streamController.isConnected();
         // Controller already closed = downstream ended; not an upstream error, skip noisy log.
@@ -155,6 +157,18 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         // (Responses passthrough prefers response.failed + [DONE] over a raw transport error)
         try {
           if (!wasConnected || isNetworkClose || onAbortTerminal) {
+            // A stream that dies before delivering any bytes must not look like a
+            // successful empty completion. Responses mode keeps its own terminal
+            // (emitTerminal below); otherwise synthesize an OpenAI-shaped error.
+            if (wasConnected && !bytesEnqueued && !onAbortTerminal) {
+              const errChunk = {
+                error: { message: `Upstream connection failed before any data was received: ${msg || code || error.name || "unknown error"}` },
+                choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+              };
+              try {
+                controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(errChunk)}\n\ndata: [DONE]\n\n`));
+              } catch { /* best-effort terminal */ }
+            }
             emitTerminal(controller);
             controller.close();
           } else {

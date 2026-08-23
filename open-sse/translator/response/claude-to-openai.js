@@ -168,6 +168,20 @@ export function claudeToOpenAIResponse(chunk, state) {
       break;
     }
 
+    case "error": {
+      // Surface provider error events to the client instead of silently dropping
+      // them (which produced an empty "successful" stream).
+      results.push({
+        error: {
+          message: chunk.error?.message || "Provider stream error",
+          type: chunk.error?.type || "api_error"
+        },
+        choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+      });
+      state.finishReasonSent = true;
+      break;
+    }
+
     case "message_stop": {
       if (!state.finishReasonSent) {
         const finishReason = state.finishReason || (state.toolCalls?.size > 0 ? OPENAI_FINISH.TOOL_CALLS : OPENAI_FINISH.STOP);
