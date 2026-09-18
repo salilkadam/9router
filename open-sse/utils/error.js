@@ -2,13 +2,20 @@ import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
 
 /**
  * Build OpenAI-compatible error response body
+ *
+ * `param` is part of OpenAI's error object and is emitted always, null when no
+ * single request field is to blame. It is nullable but not optional in several
+ * clients' models, and omitting it costs a caller the one field that says WHICH
+ * input was rejected.
+ *
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
+ * @param {string|null} [param] - Request field the error is about, e.g. "model"
  * @returns {object} Error response object
  */
-export function buildErrorBody(statusCode, message) {
-  const errorInfo = ERROR_TYPES[statusCode] || 
-    (statusCode >= 500 
+export function buildErrorBody(statusCode, message, param = null) {
+  const errorInfo = ERROR_TYPES[statusCode] ||
+    (statusCode >= 500
       ? { type: "server_error", code: "internal_server_error" }
       : { type: "invalid_request_error", code: "" });
 
@@ -16,7 +23,8 @@ export function buildErrorBody(statusCode, message) {
     error: {
       message: message || DEFAULT_ERROR_MESSAGES[statusCode] || "An error occurred",
       type: errorInfo.type,
-      code: errorInfo.code
+      code: errorInfo.code,
+      param: param ?? null
     }
   };
 }
@@ -25,10 +33,11 @@ export function buildErrorBody(statusCode, message) {
  * Create error Response object (for non-streaming)
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
+ * @param {string|null} [param] - Request field the error is about, e.g. "model"
  * @returns {Response} HTTP Response object
  */
-export function errorResponse(statusCode, message) {
-  return new Response(JSON.stringify(buildErrorBody(statusCode, message)), {
+export function errorResponse(statusCode, message, param = null) {
+  return new Response(JSON.stringify(buildErrorBody(statusCode, message, param)), {
     status: statusCode,
     headers: {
       "Content-Type": "application/json",
@@ -116,8 +125,10 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
 export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
   const msg = `${message} (${retryAfterHuman})`;
+  // Same envelope as every other error here: this used to emit `message` alone,
+  // so an SDK saw a 429 with no type and no code.
   return new Response(
-    JSON.stringify({ error: { message: msg } }),
+    JSON.stringify(buildErrorBody(statusCode, msg)),
     {
       status: statusCode,
       headers: {

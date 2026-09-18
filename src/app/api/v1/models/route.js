@@ -136,6 +136,14 @@ const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
 
+// `created` is REQUIRED on OpenAI's Model object, and openai-python models it as
+// a non-optional int: client.models.list() raises a pydantic ValidationError on
+// the first entry without it, so one missing field fails the whole listing.
+// 9Router has no real creation date for a routed model, and Date.now() would
+// make every listing differ from the last for no reason, so a fixed epoch is
+// used -- the same one gpu-ai stamps on its synthesized entries.
+const MODEL_CREATED_EPOCH = 1700000000;
+
 // Map per-model `type` field (in PROVIDER_MODELS) to service kind.
 // Models without `type` are treated as LLM.
 const MODEL_TYPE_TO_KIND = {
@@ -514,6 +522,9 @@ export async function buildModelsList(kindFilter, options = {}) {
   for (const model of models) {
     if (!model?.id || seenModelIds.has(model.id)) continue;
     seenModelIds.add(model.id);
+    // Stamped here rather than at each push site so a new source of models
+    // cannot reintroduce an entry that fails SDK schema validation.
+    if (typeof model.created !== "number") model.created = MODEL_CREATED_EPOCH;
     dedupedModels.push(model);
   }
 
@@ -590,7 +601,14 @@ export async function GET(request) {
         if (id.includes("/")) known.add(id.slice(id.indexOf("/") + 1));
       }
       for (const m of await fetchUpstreamModels()) {
-        if (m?.id && !known.has(m.id)) data.push({ ...m, owned_by: m.owned_by || "upstream" });
+        // `created` defaulted for the same reason as in buildModelsList: the
+        // upstream is not obliged to send it, and one entry without it fails
+        // the SDK's validation of the entire list.
+        if (m?.id && !known.has(m.id)) data.push({
+          ...m,
+          owned_by: m.owned_by || "upstream",
+          created: typeof m.created === "number" ? m.created : MODEL_CREATED_EPOCH,
+        });
       }
     }
 

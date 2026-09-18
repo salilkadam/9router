@@ -76,7 +76,8 @@ export async function handleChat(request, clientRawRequest = null) {
 
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+    // param names the offending request field, which is what an SDK surfaces.
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model", "model");
   }
 
   // Catch-all routing.
