@@ -38,7 +38,30 @@ export function geminiToOpenAIResponse(chunk, state) {
   
   // Handle Antigravity wrapper
   const response = chunk.response || chunk;
-  if (!response || !response.candidates?.[0]) return null;
+  if (!response) return null;
+
+  // Provider error object streamed as a chunk — surface it instead of dropping it
+  if (response.error) {
+    return [{
+      error: {
+        message: response.error.message || "Provider stream error",
+        type: response.error.status || response.error.type || "api_error"
+      },
+      choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+    }];
+  }
+
+  if (!response.candidates?.[0]) {
+    // Blocked prompt: Gemini returns promptFeedback with no candidates
+    const blockReason = response.promptFeedback?.blockReason;
+    if (blockReason) {
+      return [{
+        error: { message: `Blocked by provider: ${blockReason}`, type: "blocked" },
+        choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+      }];
+    }
+    return null;
+  }
 
   const results = [];
   const candidate = response.candidates[0];

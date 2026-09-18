@@ -152,6 +152,20 @@ export function kiroToOpenAIResponse(chunk, state) {
     return null;
   }
 
+  // Handle error/exception events - surface to client instead of silently dropping,
+  // which produced an empty "successful" stream. Covers SSE-framed errorEvent and
+  // AWS EventStream exception payloads (carrying __type + message).
+  if (eventType === "errorEvent" || eventType === "error" || eventType === "exception" || data.errorEvent || data.__type) {
+    const err = data.errorEvent || data;
+    return {
+      error: {
+        message: err.message || err.reason || "Kiro stream error",
+        type: err.__type || eventType || "api_error"
+      },
+      choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+    };
+  }
+
   // Unknown event type - skip
   return null;
 }

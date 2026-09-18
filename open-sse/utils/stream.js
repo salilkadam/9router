@@ -70,6 +70,29 @@ export function createSSEStream(options = {}) {
   let sseEmittedCount = 0;
   const eventTypeCounts = {};
 
+  // Track whether the client ever received a real chunk (content/tool_calls/finish/error),
+  // so flush can surface an error instead of ending an empty "successful" stream.
+  let emittedValuableChunk = false;
+  let lastSwallowedPayload = null;
+  const markValuable = (item) => {
+    if (emittedValuableChunk || !item || typeof item !== "object") return;
+    const choice = item.choices?.[0];
+    if (choice && (choice.delta?.content || choice.delta?.reasoning_content ||
+        choice.delta?.tool_calls?.length || choice.finish_reason)) emittedValuableChunk = true;
+    else if (item.type === "content_block_delta" || item.type === "message_delta") emittedValuableChunk = true;
+    else if (item.candidates?.[0]?.content?.parts?.length || item.candidates?.[0]?.finishReason) emittedValuableChunk = true;
+    else if (item.error) emittedValuableChunk = true;
+  };
+  // Count tool_calls name/arguments toward content length so tool-call-only
+  // streams are not treated as empty (usage estimation + empty-stream detection).
+  const addToolCallLength = (toolCalls) => {
+    if (!Array.isArray(toolCalls)) return;
+    for (const tc of toolCalls) {
+      if (typeof tc?.function?.name === "string") totalContentLength += tc.function.name.length;
+      if (typeof tc?.function?.arguments === "string") totalContentLength += tc.function.arguments.length;
+    }
+  };
+
   // Track Responses API event framing for same-format passthrough (codex)
   let currentOpenAIResponsesEvent = null;
   let openAIResponsesTerminalSeen = false;
@@ -162,6 +185,8 @@ export function createSSEStream(options = {}) {
                 totalContentLength += reasoning.length;
                 accumulatedThinking += reasoning;
               }
+              addToolCallLength(delta?.tool_calls);
+              markValuable(parsed);
 
               const extracted = extractUsage(parsed);
               if (extracted) {
@@ -188,6 +213,8 @@ export function createSSEStream(options = {}) {
               // Skip non-JSON data lines silently — don't forward garbage to clients.
               // Upstream providers sometimes return plain-text errors (HTML, rate-limit
               // messages) in the SSE stream that would break downstream JSON decoders.
+              // Remember the payload so flush can surface it if nothing else was emitted.
+              lastSwallowedPayload = trimmed.slice(5).trim().slice(0, 500);
               continue;
             }
           }
@@ -200,6 +227,11 @@ export function createSSEStream(options = {}) {
             }
           }
 
+          // Provider's own [DONE] is forwarded here — don't append another in flush
+          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]") {
+            streamDoneSent = true;
+          }
+
           reqLogger?.appendConvertedChunk?.(output);
           controller.enqueue(sharedEncoder.encode(output));
           continue;
@@ -209,7 +241,14 @@ export function createSSEStream(options = {}) {
         if (!trimmed) continue;
 
         const parsed = parseSSELine(trimmed, targetFormat);
-        if (!parsed) continue;
+        if (!parsed) {
+          // Remember unparseable data payloads (plain-text provider errors) so
+          // flush can surface them if the stream ends without emitting anything.
+          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
+            lastSwallowedPayload = trimmed.slice(5).trim().slice(0, 500);
+          }
+          continue;
+        }
 
         // Responses API same-format passthrough: preserve event framing + track terminal state
         const isOpenAIResponsesStream = targetFormat === FORMATS.OPENAI_RESPONSES;
@@ -254,7 +293,14 @@ export function createSSEStream(options = {}) {
           totalContentLength += parsed.delta.thinking.length;
           accumulatedThinking += parsed.delta.thinking;
         }
-        
+        // Claude format - tool use (name on block start, arguments as input_json deltas)
+        if (parsed.content_block?.type === "tool_use" && typeof parsed.content_block.name === "string") {
+          totalContentLength += parsed.content_block.name.length;
+        }
+        if (typeof parsed.delta?.partial_json === "string") {
+          totalContentLength += parsed.delta.partial_json.length;
+        }
+
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
@@ -265,7 +311,9 @@ export function createSSEStream(options = {}) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
           accumulatedThinking += parsed.choices[0].delta.reasoning_content;
         }
-        
+        // OpenAI format - tool calls
+        addToolCallLength(parsed.choices?.[0]?.delta?.tool_calls);
+
         // Gemini format
         if (parsed.candidates?.[0]?.content?.parts) {
           for (const part of parsed.candidates[0].content.parts) {
@@ -277,6 +325,11 @@ export function createSSEStream(options = {}) {
               } else {
                 accumulatedContent += part.text;
               }
+            }
+            // Gemini format - function calls
+            if (part.functionCall) {
+              if (typeof part.functionCall.name === "string") totalContentLength += part.functionCall.name.length;
+              if (part.functionCall.args) totalContentLength += JSON.stringify(part.functionCall.args).length;
             }
           }
         }
@@ -328,6 +381,7 @@ export function createSSEStream(options = {}) {
               item.usage = filterUsageForFormat(buffered, sourceFormat);
             }
 
+            markValuable(item);
             const output = formatSSE(item, sourceFormat);
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(sharedEncoder.encode(output));
@@ -364,7 +418,19 @@ export function createSSEStream(options = {}) {
           } else {
             appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
           }
-          
+
+          // A stream that ends without ever delivering content/tool_calls/finish must
+          // not look like a successful empty completion — surface a terminal error.
+          if (!emittedValuableChunk) {
+            const errorChunk = {
+              error: { message: "Provider stream ended without content" + (lastSwallowedPayload ? `: ${lastSwallowedPayload}` : "") },
+              choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+            };
+            const errOutput = `data: ${JSON.stringify(errorChunk)}\n\n`;
+            reqLogger?.appendConvertedChunk?.(errOutput);
+            controller.enqueue(sharedEncoder.encode(errOutput));
+          }
+
           // IMPORTANT: In passthrough mode we still must terminate the SSE stream.
           // Some clients (e.g. OpenClaw) expect the OpenAI-style sentinel:
           //   data: [DONE]\n\n
@@ -401,6 +467,7 @@ export function createSSEStream(options = {}) {
             if (translated?.length > 0) {
               for (const item of translated) {
                 if (item === null || item === undefined) continue;
+                markValuable(item);
                 const output = formatSSE(item, sourceFormat);
                 reqLogger?.appendConvertedChunk?.(output);
                 controller.enqueue(sharedEncoder.encode(output));
@@ -421,6 +488,7 @@ export function createSSEStream(options = {}) {
         if (flushed?.length > 0) {
           for (const item of flushed) {
             if (item === null || item === undefined) continue;
+            markValuable(item);
             const output = formatSSE(item, sourceFormat);
             reqLogger?.appendConvertedChunk?.(output);
             controller.enqueue(sharedEncoder.encode(output));
@@ -442,6 +510,26 @@ export function createSSEStream(options = {}) {
           controller.enqueue(sharedEncoder.encode(doneOutput));
           openAIResponsesDoneSent = true;
           streamDoneSent = true;
+        }
+
+        // A stream that ends without ever delivering content/tool_calls/finish must
+        // not look like a successful empty completion — surface a terminal error.
+        // (Responses passthrough already synthesizes response.failed above.)
+        if (!emittedValuableChunk && !keepsOpenAIResponsesFormat) {
+          const errorChunk = {
+            error: { message: "Provider stream ended without content" + (lastSwallowedPayload ? `: ${lastSwallowedPayload}` : "") },
+            choices: [{ index: 0, delta: {}, finish_reason: "error" }]
+          };
+          const errOutput = `data: ${JSON.stringify(errorChunk)}\n\n`;
+          reqLogger?.appendConvertedChunk?.(errOutput);
+          controller.enqueue(sharedEncoder.encode(errOutput));
+        }
+
+        // OpenAI chat clients expect the [DONE] sentinel; the provider's own
+        // [DONE] is swallowed during translation, so terminate the stream here.
+        if (sourceFormat === FORMATS.OPENAI) {
+          reqLogger?.appendConvertedChunk?.(SSE_DONE);
+          controller.enqueue(sharedEncoder.encode(SSE_DONE));
         }
 
         if (!hasValidUsage(state?.usage) && totalContentLength > 0) {
