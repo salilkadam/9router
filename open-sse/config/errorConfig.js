@@ -38,6 +38,14 @@ export const BACKOFF_CONFIG = {
 // Default cooldown for transient/unknown errors
 export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 
+// Statuses that mean THIS REQUEST was rejected, not that the account is
+// broken: context too long, malformed tool schema, unsupported parameter.
+// Checked after ERROR_RULES (so a 400 whose body says "rate limit" still
+// backs off) and before the transient default. Without this, one oversize
+// prompt put the whole openai-compatible connection into a 30s cooldown and
+// a 4-token request from another caller got the same error (2026-09-20).
+export const CLIENT_ERROR_STATUSES = new Set([400, 413, 422]);
+
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 

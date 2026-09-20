@@ -1,4 +1,4 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, CLIENT_ERROR_STATUSES } from "../config/errorConfig.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -43,6 +43,12 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
       }
       return { shouldFallback: true, cooldownMs: rule.cooldownMs };
     }
+  }
+
+  // A client-side rejection no rule matched: the account is fine, hand the
+  // error back to the caller and do not touch the connection.
+  if (CLIENT_ERROR_STATUSES.has(status)) {
+    return { shouldFallback: false, cooldownMs: 0 };
   }
 
   // Default: transient cooldown for any unmatched error
