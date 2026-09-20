@@ -1,4 +1,4 @@
-import { buildCatalogue, buildModelsList } from "../route.js";
+import { bareIdExists, buildCatalogue, buildModelsList } from "../route.js";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
 const KIND_SLUG_MAP = {
@@ -55,9 +55,12 @@ export async function findModel(id) {
  * Both /v1/models and this route resolve from buildCatalogue, so an id the
  * list returns is one retrieve can find. That holds even when the id is
  * spelled like a kind slug: combo names pass /^[a-zA-Z0-9_.\-]+$/, so an
- * admin can create a combo called `tts`, and the list will advertise it.
- * An exact catalogue match therefore wins over the kind listing --
- * OpenAI's contract outranks a dashboard convenience.
+ * admin can create a combo called `tts` (of any kind, including tts), and
+ * the list will advertise it. An exact id match therefore wins over the
+ * kind listing -- OpenAI's contract outranks a dashboard convenience.
+ * The one name this route cannot rescue is `info`: /v1/models/info is a
+ * static sibling route that Next dispatches before this one, so the combos
+ * API refuses that name instead.
  *
  * Segments arrive already percent-decoded (Next's route matcher decodes each
  * catch-all entry), so they are joined as-is; decoding again turned a listed
@@ -71,10 +74,14 @@ export async function GET(_request, { params }) {
 
     const kindFilter = segments.length === 1 ? KIND_SLUG_MAP[segments[0]] : undefined;
     if (kindFilter) {
-      // Per-kind entries are always `alias/model`, so a bare slug can only
-      // collide with the LLM catalogue (combo names, upstream ids). One pass.
-      const shadowing = (await buildCatalogue()).find((m) => m.id === id);
-      if (shadowing) return Response.json(shadowing, { headers: CORS });
+      // A combo may be named after a kind -- and may itself be of that kind,
+      // so it is listed under this very slug. Only combos and upstream ids
+      // are ever bare, and bareIdExists checks those without building a
+      // catalogue; the full resolve runs only when there is a collision.
+      if (await bareIdExists(id)) {
+        const shadowing = await findModel(id);
+        if (shadowing) return Response.json(shadowing, { headers: CORS });
+      }
       const data = await buildModelsList(kindFilter);
       return Response.json({ object: "list", data }, { headers: CORS });
     }

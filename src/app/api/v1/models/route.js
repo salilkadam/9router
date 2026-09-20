@@ -583,6 +583,25 @@ async function fetchUpstreamModels() {
 }
 
 /**
+ * Cheap answer to "could the list advertise a bare (slash-free) id equal to
+ * this?" without building the catalogue. Bare ids come from exactly two
+ * places: combo names (buildModelsList pushes combo.name for every kind) and
+ * the upstream catalogue (already TTL-cached). Everything else is
+ * `alias/model`. Used by /v1/models/{kind} to decide whether a slug request
+ * must first be tried as a retrieve, so kind listings do not pay for a full
+ * LLM pass -- with its live provider resolvers -- on every call.
+ */
+export async function bareIdExists(id) {
+  try {
+    if ((await getCombos()).some((c) => c?.name === id)) return true;
+  } catch {
+    // DB unavailable: the list falls back to static models with no combos,
+    // so there is no bare combo id to shadow either.
+  }
+  return (await fetchUpstreamModels()).some((m) => m?.id === id);
+}
+
+/**
  * The catalogue GET /v1/models returns: 9Router's own LLM entries, then the
  * upstream's, when configured. Exported so /v1/models/{id} resolves against
  * the SAME set -- a retrieve that consults a different source than the list
