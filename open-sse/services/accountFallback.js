@@ -18,9 +18,14 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
+ * @param {{ scope?: "account"|"model" }} [opts] - "account" (default): the caller
+ *   is deciding whether to lock this credential and rotate to another account;
+ *   a request-level 4xx (CLIENT_ERROR_STATUSES) then means "do not". "model":
+ *   the caller is a combo iterating models; a 4xx one member rejects may be
+ *   fine for the next, so it keeps falling through.
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0) {
+export function checkFallbackError(status, errorText, backoffLevel = 0, { scope = "account" } = {}) {
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
@@ -46,8 +51,9 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
   }
 
   // A client-side rejection no rule matched: the account is fine, hand the
-  // error back to the caller and do not touch the connection.
-  if (CLIENT_ERROR_STATUSES.has(status)) {
+  // error back to the caller and do not touch the connection. A combo
+  // (scope "model") still tries its next member.
+  if (scope === "account" && CLIENT_ERROR_STATUSES.has(status)) {
     return { shouldFallback: false, cooldownMs: 0 };
   }
 
