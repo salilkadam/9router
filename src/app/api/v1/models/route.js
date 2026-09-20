@@ -583,6 +583,35 @@ async function fetchUpstreamModels() {
 }
 
 /**
+ * The catalogue GET /v1/models returns: 9Router's own LLM entries, then the
+ * upstream's, when configured. Exported so /v1/models/{id} resolves against
+ * the SAME set -- a retrieve that consults a different source than the list
+ * is how a client ends up with an id it was told exists and a 404 for it.
+ */
+export async function buildCatalogue({ skipDynamicFetch = false } = {}) {
+  const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+  if (skipDynamicFetch) return data;
+
+  const known = new Set(data.map((m) => m.id));
+  // Prefixed ids (gpu/qwen...) already cover the bare upstream id, so match
+  // on the suffix too or every model would be listed twice.
+  for (const id of [...known]) {
+    if (id.includes("/")) known.add(id.slice(id.indexOf("/") + 1));
+  }
+  for (const m of await fetchUpstreamModels()) {
+    // `created` defaulted for the same reason as in buildModelsList: the
+    // upstream is not obliged to send it, and one entry without it fails
+    // the SDK's validation of the entire list.
+    if (m?.id && !known.has(m.id)) data.push({
+      ...m,
+      owned_by: m.owned_by || "upstream",
+      created: typeof m.created === "number" ? m.created : MODEL_CREATED_EPOCH,
+    });
+  }
+  return data;
+}
+
+/**
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  * When UPSTREAM_MODELS_URL is set, that upstream's catalogue is merged in.
@@ -591,26 +620,7 @@ export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
-
-    if (!skipDynamicFetch) {
-      const known = new Set(data.map((m) => m.id));
-      // Prefixed ids (gpu/qwen...) already cover the bare upstream id, so match
-      // on the suffix too or every model would be listed twice.
-      for (const id of [...known]) {
-        if (id.includes("/")) known.add(id.slice(id.indexOf("/") + 1));
-      }
-      for (const m of await fetchUpstreamModels()) {
-        // `created` defaulted for the same reason as in buildModelsList: the
-        // upstream is not obliged to send it, and one entry without it fails
-        // the SDK's validation of the entire list.
-        if (m?.id && !known.has(m.id)) data.push({
-          ...m,
-          owned_by: m.owned_by || "upstream",
-          created: typeof m.created === "number" ? m.created : MODEL_CREATED_EPOCH,
-        });
-      }
-    }
+    const data = await buildCatalogue({ skipDynamicFetch });
 
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
