@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildCatalogue, buildModelsList } from "../../src/app/api/v1/models/route.js";
-import { GET, findModel } from "../../src/app/api/v1/models/[...path]/route.js";
+import { GET } from "../../src/app/api/v1/models/[...path]/route.js";
 
 const call = (segments) => GET(undefined, { params: Promise.resolve({ path: segments }) });
 
@@ -20,11 +20,23 @@ describe("GET /v1/models/{id} agrees with GET /v1/models", () => {
     }
   });
 
-  it("finds models advertised only under a per-kind listing", async () => {
+  it("retrieves models advertised only under a per-kind listing, through GET", async () => {
     const kinds = await buildModelsList(["tts", "stt", "embedding", "image"]);
+    expect(kinds.length).toBeGreaterThan(0);
     for (const m of kinds) {
-      expect(await findModel(m.id), m.id).toEqual(m);
+      const res = await call(m.id.split("/"));
+      expect(res.status, m.id).toBe(200);
+      expect(await res.json()).toEqual(m);
     }
+  });
+
+  // Next's route matcher hands the handler already-decoded segments. A second
+  // decodeURIComponent turned any id holding a literal "%" (custom-model ids
+  // are not character-validated) into "URI malformed" -> 500.
+  it("does not 500 on an id containing a literal percent sign", async () => {
+    const res = await call(["50%off"]);
+    expect(res.status).toBe(404);
+    expect((await res.json()).error.code).toBe("model_not_found");
   });
 
   it("matches exactly -- a bare suffix does not alias a prefixed id", async () => {
@@ -33,17 +45,19 @@ describe("GET /v1/models/{id} agrees with GET /v1/models", () => {
     const suffix = prefixed.id.slice(prefixed.id.indexOf("/") + 1);
     const catalogue = await buildCatalogue();
     if (catalogue.some((m) => m.id === suffix)) return; // legitimately listed on its own
-    expect(await findModel(suffix)).toBeNull();
+    expect((await call(suffix.split("/"))).status).toBe(404);
   });
 
   it("answers an unknown id with OpenAI's model_not_found body", async () => {
     const res = await call(["no-such-model-8f2c"]);
     expect(res.status).toBe(404);
+    // OpenAI's body, including param null: no request field is at fault, and
+    // the gateway's own 404 post-function uses null for the same reason.
     expect(await res.json()).toEqual({
       error: {
-        message: "The model 'no-such-model-8f2c' does not exist",
+        message: "The model `no-such-model-8f2c` does not exist or you do not have access to it.",
         type: "invalid_request_error",
-        param: "model",
+        param: null,
         code: "model_not_found",
       },
     });

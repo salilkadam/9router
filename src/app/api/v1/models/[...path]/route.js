@@ -52,39 +52,51 @@ export async function findModel(id) {
  * GET /v1/models/{id}    - OpenAI-compatible retrieve. The id may contain
  *                          slashes (gpu/qwen3.5-27b-fp8), hence the catch-all.
  *
- * A single-segment path that names a kind is a kind listing; anything else is
- * a model id. Both /v1/models and this route resolve from buildCatalogue, so
- * an id the list returns is one retrieve can find.
+ * Both /v1/models and this route resolve from buildCatalogue, so an id the
+ * list returns is one retrieve can find. That holds even when the id is
+ * spelled like a kind slug: combo names pass /^[a-zA-Z0-9_.\-]+$/, so an
+ * admin can create a combo called `tts`, and the list will advertise it.
+ * An exact catalogue match therefore wins over the kind listing --
+ * OpenAI's contract outranks a dashboard convenience.
+ *
+ * Segments arrive already percent-decoded (Next's route matcher decodes each
+ * catch-all entry), so they are joined as-is; decoding again turned a listed
+ * id containing a literal "%" into a 500.
  */
 export async function GET(_request, { params }) {
   try {
     const { path } = await params;
     const segments = Array.isArray(path) ? path : [path];
-    const kindFilter = segments.length === 1 ? KIND_SLUG_MAP[segments[0]] : undefined;
+    const id = segments.join("/");
 
+    const kindFilter = segments.length === 1 ? KIND_SLUG_MAP[segments[0]] : undefined;
     if (kindFilter) {
+      // Per-kind entries are always `alias/model`, so a bare slug can only
+      // collide with the LLM catalogue (combo names, upstream ids). One pass.
+      const shadowing = (await buildCatalogue()).find((m) => m.id === id);
+      if (shadowing) return Response.json(shadowing, { headers: CORS });
       const data = await buildModelsList(kindFilter);
       return Response.json({ object: "list", data }, { headers: CORS });
     }
 
-    const id = segments.map((s) => decodeURIComponent(s)).join("/");
     const model = await findModel(id);
-    if (!model) {
-      // OpenAI's own 404 for an unknown model, field for field, so an SDK's
-      // NotFoundError carries the same code/param it would from api.openai.com.
-      return Response.json(
-        {
-          error: {
-            message: `The model '${id}' does not exist`,
-            type: "invalid_request_error",
-            param: "model",
-            code: "model_not_found",
-          },
+    if (model) return Response.json(model, { headers: CORS });
+
+    // OpenAI's own body for an unknown model: message, type, param null and
+    // code model_not_found, so an SDK's NotFoundError carries what it would
+    // from api.openai.com. param is null because no request field is at
+    // fault -- the same shape the gateway's post-function emits for 404s.
+    return Response.json(
+      {
+        error: {
+          message: `The model \`${id}\` does not exist or you do not have access to it.`,
+          type: "invalid_request_error",
+          param: null,
+          code: "model_not_found",
         },
-        { status: 404, headers: CORS }
-      );
-    }
-    return Response.json(model, { headers: CORS });
+      },
+      { status: 404, headers: CORS }
+    );
   } catch (error) {
     console.log("Error fetching model:", error);
     return Response.json(
