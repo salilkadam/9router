@@ -41,16 +41,25 @@ const dataEvents = (text) => text.split("\n")
   .map((l) => JSON.parse(l.slice(5).trim()));
 
 describe("normalizeOpenAIReasoningDelta", () => {
-  it("mirrors delta.reasoning into reasoning_content and keeps reasoning", () => {
+  // 2026-10-04: mirroring (keeping both fields) made Zed, which reads both, render every
+  // thinking token twice; the agent sent that back as history and the model began emitting
+  // the stutter itself. Exactly one field must carry the text.
+  it("moves delta.reasoning into reasoning_content", () => {
     const c = chunk({ reasoning: "We need" });
     expect(normalizeOpenAIReasoningDelta(c)).toBe(true);
-    expect(c.choices[0].delta).toEqual({ reasoning: "We need", reasoning_content: "We need" });
+    expect(c.choices[0].delta).toEqual({ reasoning_content: "We need" });
   });
 
-  it("leaves an existing reasoning_content alone", () => {
+  it("drops a reasoning identical to reasoning_content", () => {
+    const c = chunk({ reasoning: "a", reasoning_content: "a" });
+    expect(normalizeOpenAIReasoningDelta(c)).toBe(true);
+    expect(c.choices[0].delta).toEqual({ reasoning_content: "a" });
+  });
+
+  it("leaves a differing reasoning_content alone", () => {
     const c = chunk({ reasoning: "a", reasoning_content: "b" });
     expect(normalizeOpenAIReasoningDelta(c)).toBe(false);
-    expect(c.choices[0].delta.reasoning_content).toBe("b");
+    expect(c.choices[0].delta).toEqual({ reasoning: "a", reasoning_content: "b" });
   });
 
   it("ignores empty reasoning and non-chat chunks", () => {
@@ -66,7 +75,7 @@ describe("hasValuableContent", () => {
 });
 
 describe("passthrough stream keeps vLLM `delta.reasoning` chunks", () => {
-  it("forwards reasoning-only chunks with both field names, then the answer", async () => {
+  it("forwards reasoning-only chunks under reasoning_content only, then the answer", async () => {
     const out = dataEvents(await pipe(createPassthroughStreamWithLogger("openai-compatible-chat-test", null, "qwen3.6-35b-a3b-fp8-think"), [
       chunk({ role: "assistant", content: "" }),
       chunk({ reasoning: "We need" }),
@@ -79,7 +88,7 @@ describe("passthrough stream keeps vLLM `delta.reasoning` chunks", () => {
     const reasoningRaw = out.map((e) => e.choices?.[0]?.delta?.reasoning || "").join("");
     const content = out.map((e) => e.choices?.[0]?.delta?.content || "").join("");
     expect(reasoning).toBe("We need to check.");
-    expect(reasoningRaw).toBe("We need to check.");
+    expect(reasoningRaw).toBe("");
     expect(content).toBe("No.");
   });
 });

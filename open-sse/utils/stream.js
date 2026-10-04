@@ -157,7 +157,7 @@ export function createSSEStream(options = {}) {
               }
 
               // `delta.reasoning`-only chunks (current vLLM) were dropped by the filter below,
-              // so streamed thinking never reached the client. Mirror into reasoning_content.
+              // so streamed thinking never reached the client. Move into reasoning_content.
               if (normalizeOpenAIReasoningDelta(parsed)) fieldsInjected = true;
 
               // Strip empty tool_calls arrays that break AI SDK reasoning tracking.
@@ -245,7 +245,7 @@ export function createSSEStream(options = {}) {
         if (!trimmed) continue;
 
         const parsed = parseSSELine(trimmed, targetFormat);
-        // Translators read reasoning_content; give them current vLLM's `delta.reasoning` too.
+        // Translators read reasoning_content; move current vLLM's `delta.reasoning` there.
         if (parsed) normalizeOpenAIReasoningDelta(parsed);
         if (!parsed) {
           // Remember unparseable data payloads (plain-text provider errors) so
