@@ -2,7 +2,7 @@ import { translateResponse, initState } from "../translator/index.js";
 import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
-import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
+import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE, normalizeOpenAIReasoningDelta } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
@@ -156,6 +156,10 @@ export function createSSEStream(options = {}) {
                 }
               }
 
+              // `delta.reasoning`-only chunks (current vLLM) were dropped by the filter below,
+              // so streamed thinking never reached the client. Mirror into reasoning_content.
+              if (normalizeOpenAIReasoningDelta(parsed)) fieldsInjected = true;
+
               // Strip empty tool_calls arrays that break AI SDK reasoning tracking.
               // Some providers (e.g. CodeBuddy CN) include `"tool_calls": []` in
               // every streaming delta. @ai-sdk/openai-compatible checks
@@ -241,6 +245,8 @@ export function createSSEStream(options = {}) {
         if (!trimmed) continue;
 
         const parsed = parseSSELine(trimmed, targetFormat);
+        // Translators read reasoning_content; give them current vLLM's `delta.reasoning` too.
+        if (parsed) normalizeOpenAIReasoningDelta(parsed);
         if (!parsed) {
           // Remember unparseable data payloads (plain-text provider errors) so
           // flush can surface them if the stream ends without emitting anything.

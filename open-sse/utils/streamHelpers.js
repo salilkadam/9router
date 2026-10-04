@@ -33,6 +33,25 @@ export function parseSSELine(line, format = null) {
   }
 }
 
+// Current vLLM (and OpenRouter) stream thinking as `delta.reasoning`; older vLLM, DeepSeek and
+// most clients use `delta.reasoning_content`. Mirror `reasoning` into `reasoning_content` when
+// only the former is present, so downstream code (filters, translators, usage) and clients that
+// read either field all see it. `reasoning` is kept for clients that read that one.
+// Returns true if the chunk was changed.
+export function normalizeOpenAIReasoningDelta(chunk) {
+  if (!Array.isArray(chunk?.choices)) return false;
+  let changed = false;
+  for (const choice of chunk.choices) {
+    const delta = choice?.delta;
+    if (delta && typeof delta.reasoning === "string" && delta.reasoning !== "" &&
+        (delta.reasoning_content === undefined || delta.reasoning_content === null)) {
+      delta.reasoning_content = delta.reasoning;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // Check if chunk has valuable content (not empty)
 export function hasValuableContent(chunk, format) {
   // OpenAI format
@@ -40,6 +59,7 @@ export function hasValuableContent(chunk, format) {
     const delta = chunk.choices[0].delta;
     return delta.content && delta.content !== "" ||
            delta.reasoning_content && delta.reasoning_content !== "" ||
+           delta.reasoning && delta.reasoning !== "" ||
            delta.tool_calls && delta.tool_calls.length > 0 ||
            chunk.choices[0].finish_reason ||
            delta.role;
