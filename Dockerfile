@@ -7,9 +7,15 @@ FROM base AS builder
 
 RUN apk --no-cache upgrade && apk --no-cache add python3 make g++ linux-headers
 
-COPY package.json ./
+# Install EXACTLY what package-lock.json says. This used to copy package.json
+# alone and run `npm install`, so "next": "^16.1.6" resolved to whatever was
+# newest that day: rebuilding an unchanged tree on 2026-10-11 moved Next.js
+# 16.3.8 -> 16.4.0. The lockfile is committed for this reason; change a
+# dependency by updating it on purpose (npm install <pkg>@<version>), then
+# compare the built image's node_modules with the running one before deploying.
+COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
-  npm install
+  npm ci
 
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
