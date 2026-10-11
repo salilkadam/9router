@@ -7,8 +7,9 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
-import { getSettings, getProviderConnections } from "@/lib/localDb";
+import { getSettings, getProviderConnections, getCombos, getApiKeys } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
+import { isStrictModelNames, strictModelRefusal } from "../services/strictModels.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
@@ -98,6 +99,24 @@ export async function handleChat(request, clientRawRequest = null) {
   // explicit "provider/model" is always honoured as asked, and so is any name
   // with a combo or alias, so this cannot silently hijack a working request.
   // Unset = upstream behaviour, unchanged.
+  // STRICT_MODEL_NAMES comes first and, when on, leaves the catch-all below
+  // nothing to absorb: a bare name is a combo or a 404. See strictModels.js.
+  if (isStrictModelNames() && !modelStr.includes("/")) {
+    const isCombo = (await getComboModels(modelStr)) !== null;
+    if (!isCombo) {
+      const comboNames = ((await getCombos()) || []).map((c) => c.name);
+      const refusal = strictModelRefusal({ model: modelStr, isCombo, comboNames });
+      // WHO sent it is the point: the key is named after the Kong consumer.
+      let caller = "no key";
+      if (apiKey) {
+        const key = ((await getApiKeys()) || []).find((k) => k.key === apiKey);
+        caller = key?.name || "unknown key";
+      }
+      log.warn("CHAT", `Refused model "${modelStr}" from ${caller}: not a combo (STRICT_MODEL_NAMES)`);
+      return errorResponse(HTTP_STATUS.NOT_FOUND, refusal, "model");
+    }
+  }
+
   const defaultModel = process.env.DEFAULT_MODEL;
   if (defaultModel && modelStr !== defaultModel && !modelStr.includes("/")) {
     // inferProviderFromModelName never returns null -- it GUESSES -- so
