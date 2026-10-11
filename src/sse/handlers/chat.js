@@ -218,6 +218,18 @@ export async function handleChat(request, clientRawRequest = null) {
  * Handle single model chat request
  */
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+  // STRICT_MODEL_NAMES applies to combo MEMBERS too. A member that is a bare
+  // name is meant to be another combo; if that combo is gone, getModelInfo
+  // below would guess a provider for it. That is exactly how "auto" sent a
+  // conversation to api.openai.com on 2026-10-10, after its first member's
+  // combo was deleted. A 404 here makes the combo move on to its next member.
+  if (isStrictModelNames() && !modelStr.includes("/") && (await getComboModels(modelStr)) === null) {
+    const comboNames = ((await getCombos()) || []).map((c) => c.name);
+    log.warn("CHAT", `Skipped model "${modelStr}": not a combo and no provider given (STRICT_MODEL_NAMES)`);
+    return errorResponse(HTTP_STATUS.NOT_FOUND,
+      strictModelRefusal({ model: modelStr, isCombo: false, comboNames }), "model");
+  }
+
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
