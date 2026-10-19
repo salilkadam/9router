@@ -7,8 +7,9 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getProviderConnections, getCombos, getApiKeys } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
+import { isStrictModelNames, strictModelRefusal } from "../services/strictModels.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
@@ -46,7 +47,7 @@ export async function handleChat(request, clientRawRequest = null) {
       headers: Object.fromEntries(request.headers.entries())
     };
   }
-  const modelStr = body.model;
+  let modelStr = body.model;
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
 
@@ -76,7 +77,66 @@ export async function handleChat(request, clientRawRequest = null) {
 
   if (!modelStr) {
     log.warn("CHAT", "Missing model");
-    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
+    // param names the offending request field, which is what an SDK surfaces.
+    return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model", "model");
+  }
+
+  // Catch-all routing.
+  //
+  // A bare model name resolves combo -> user alias -> builtin alias ->
+  // inferProviderFromModelName(), and that last step GUESSES from the name
+  // prefix, landing on "openai" for anything it does not recognise. With no
+  // OpenAI connection that is a hard failure, so every caller sending an
+  // upstream model name ("qwen3.6-35b-a3b-fp8", "gemma-4-e4b-it", "gpt-4o")
+  // got "No active credentials for provider: openai" instead of an answer.
+  //
+  // When this router fronts a gateway, the contract is "an LLM call always
+  // works", not "this exact checkpoint or nothing". DEFAULT_MODEL names a
+  // combo to absorb anything unroutable, so an unknown name gets the tiered
+  // chain rather than an error.
+  //
+  // Deliberately narrow: only bare, unresolvable names are rewritten. An
+  // explicit "provider/model" is always honoured as asked, and so is any name
+  // with a combo or alias, so this cannot silently hijack a working request.
+  // Unset = upstream behaviour, unchanged.
+  // STRICT_MODEL_NAMES comes first and, when on, leaves the catch-all below
+  // nothing to absorb: a bare name is a combo or a 404. See strictModels.js.
+  if (isStrictModelNames() && !modelStr.includes("/")) {
+    const isCombo = (await getComboModels(modelStr)) !== null;
+    if (!isCombo) {
+      const comboNames = ((await getCombos()) || []).map((c) => c.name);
+      const refusal = strictModelRefusal({ model: modelStr, isCombo, comboNames });
+      // WHO sent it is the point: the key is named after the Kong consumer.
+      let caller = "no key";
+      if (apiKey) {
+        const key = ((await getApiKeys()) || []).find((k) => k.key === apiKey);
+        caller = key?.name || "unknown key";
+      }
+      log.warn("CHAT", `Refused model "${modelStr}" from ${caller}: not a combo (STRICT_MODEL_NAMES)`);
+      return errorResponse(HTTP_STATUS.NOT_FOUND, refusal, "model");
+    }
+  }
+
+  const defaultModel = process.env.DEFAULT_MODEL;
+  if (defaultModel && modelStr !== defaultModel && !modelStr.includes("/")) {
+    // inferProviderFromModelName never returns null -- it GUESSES -- so
+    // "did it resolve?" is not the question. The question is whether the
+    // provider it landed on has an active connection, because that is what
+    // decides success or a credentials error.
+    const isCombo = (await getComboModels(modelStr)) !== null;
+    let routable = isCombo;
+    if (!routable) {
+      const info = await getModelInfo(modelStr);
+      if (info?.provider) {
+        const conns = await getProviderConnections();
+        routable = conns.some((c) => c.provider === info.provider && c.isActive !== false);
+      }
+    }
+    if (!routable) {
+      log.info("CHAT", `Model "${modelStr}" is not routable here; routing via DEFAULT_MODEL "${defaultModel}"`);
+      modelStr = defaultModel;
+      body.model = defaultModel;
+    }
   }
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
@@ -158,6 +218,18 @@ export async function handleChat(request, clientRawRequest = null) {
  * Handle single model chat request
  */
 async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+  // STRICT_MODEL_NAMES applies to combo MEMBERS too. A member that is a bare
+  // name is meant to be another combo; if that combo is gone, getModelInfo
+  // below would guess a provider for it. That is exactly how "auto" sent a
+  // conversation to api.openai.com on 2026-10-10, after its first member's
+  // combo was deleted. A 404 here makes the combo move on to its next member.
+  if (isStrictModelNames() && !modelStr.includes("/") && (await getComboModels(modelStr)) === null) {
+    const comboNames = ((await getCombos()) || []).map((c) => c.name);
+    log.warn("CHAT", `Skipped model "${modelStr}": not a combo and no provider given (STRICT_MODEL_NAMES)`);
+    return errorResponse(HTTP_STATUS.NOT_FOUND,
+      strictModelRefusal({ model: modelStr, isCombo: false, comboNames }), "model");
+  }
+
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle

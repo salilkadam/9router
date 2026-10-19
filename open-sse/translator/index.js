@@ -115,7 +115,13 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   const kiroThinkingMappedByTranslator =
     targetFormat === FORMATS.KIRO &&
     (sourceFormat === FORMATS.OPENAI || sourceFormat === FORMATS.CLAUDE);
-  if (!kiroThinkingMappedByTranslator) {
+  // Opt-in per connection (providerSpecificData.passthroughThinking: true): the upstream is a
+  // gateway that speaks OpenAI reasoning params itself (our mcp-api-server maps
+  // reasoning_effort onto its model's chat template). Capability-based normalisation would
+  // otherwise strip them for models it does not know (qwen3.8-*) or rewrite them into a
+  // vendor shape the upstream ignores (qwen3.6-* -> DashScope enable_thinking/thinking_budget).
+  const passthroughThinking = credentials?.providerSpecificData?.passthroughThinking === true;
+  if (!kiroThinkingMappedByTranslator && !passthroughThinking) {
     applyThinking(targetFormat, model, result, provider, thinkingIntent);
   }
 

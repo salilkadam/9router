@@ -238,9 +238,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
   }
-  if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
-
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
+  if (!shouldFallback) {
+    // Request-level rejection (CLIENT_ERROR_STATUSES): the error goes back to
+    // the caller and the account is not locked -- but it must still be
+    // visible here, or an integration bug that fails every request with a
+    // structural 400 would look like a healthy account.
+    const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
+    log.warn("AUTH", `${connName} request rejected [${status}] (no lock): ${reason}`);
+    return { shouldFallback: false, cooldownMs: 0 };
+  }
+
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
   await updateProviderConnection(connectionId, {

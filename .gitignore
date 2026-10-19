@@ -60,7 +60,7 @@ PUBLIC.md
 Thanks.md
 PUBLIC.en.md
 PR/*
-package-lock.json
+# package-lock.json is COMMITTED: the Docker build installs from it (npm ci).
 
 
 #Ignore vscode AI rules

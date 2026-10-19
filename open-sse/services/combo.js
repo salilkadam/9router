@@ -297,8 +297,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         try { errorText = JSON.stringify(errorText); } catch { errorText = String(errorText); }
       }
 
-      // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      // Check if should fallback to next model. scope "model": a 400 this
+      // member rejects (e.g. context too long) may be fine for the next one.
+      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText, 0, { scope: "model" });
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });

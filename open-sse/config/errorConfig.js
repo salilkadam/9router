@@ -38,6 +38,17 @@ export const BACKOFF_CONFIG = {
 // Default cooldown for transient/unknown errors
 export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
 
+// Statuses that mean THIS REQUEST was rejected, not that the account is
+// broken: context too long, malformed tool schema, unsupported parameter.
+// Checked after ERROR_RULES (so a 400 whose body says "rate limit" or
+// "incorrect api key" still classifies by its text) and before the transient
+// default. Without this, one oversize prompt put the whole openai-compatible
+// connection into a 30s cooldown and a 4-token request from another caller
+// got the same error (2026-09-20). Applies to ACCOUNT scope only: a combo
+// iterating MODELS still moves to the next member, which may have a larger
+// context window (see checkFallbackError's `scope`).
+export const CLIENT_ERROR_STATUSES = new Set([400, 413, 422]);
+
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
@@ -59,6 +70,15 @@ const COOLDOWN = {
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
+  // Credential rejections that arrive as a 400 rather than 401 (xai returns
+  // 400 for a bad key -- see src/app/api/providers/validate/route.js). These
+  // must classify as an account problem BEFORE the CLIENT_ERROR_STATUSES
+  // exemption below can treat the 400 as a per-request rejection.
+  { text: "incorrect api key",        cooldownMs: COOLDOWN.long },
+  { text: "invalid api key",          cooldownMs: COOLDOWN.long },
+  { text: "invalid_api_key",          cooldownMs: COOLDOWN.long },
+  { text: "authentication_error",     cooldownMs: COOLDOWN.long },
+  { text: "unauthorized",             cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },
   { text: "rate limit",               backoff: true },

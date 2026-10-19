@@ -97,7 +97,7 @@ export async function handleImageGenerationCore({
 
   try {
     url = adapter.buildUrl(model, credentials);
-    requestBody = await adapter.buildBody(model, body);
+    requestBody = await adapter.buildBody(model, body, credentials);
     headers = adapter.buildHeaders(credentials, requestBody, model, body);
   } catch (error) {
     return createErrorResult(HTTP_STATUS.BAD_REQUEST, error.message || `Invalid ${provider} image request`);
@@ -138,7 +138,7 @@ export async function handleImageGenerationCore({
       if (onCredentialsRefreshed) await onCredentialsRefreshed(newCredentials);
 
       try {
-        const retryBody = await adapter.buildBody(model, body);
+        const retryBody = await adapter.buildBody(model, body, credentials);
         const retryHeaders = adapter.buildHeaders(credentials, retryBody, model, body);
         const retryUrl = adapter.buildUrl(model, credentials);
         providerResponse = await fetch(retryUrl, {

@@ -136,6 +136,14 @@ const INTERNAL_MODELS_FETCH_HEADER = "x-9r-internal-models-fetch";
 // LLM kind sentinel — combos/models with no explicit kind default to LLM
 const LLM_KIND = "llm";
 
+// `created` is REQUIRED on OpenAI's Model object, and openai-python models it as
+// a non-optional int: client.models.list() raises a pydantic ValidationError on
+// the first entry without it, so one missing field fails the whole listing.
+// 9Router has no real creation date for a routed model, and Date.now() would
+// make every listing differ from the last for no reason, so a fixed epoch is
+// used -- the same one gpu-ai stamps on its synthesized entries.
+const MODEL_CREATED_EPOCH = 1700000000;
+
 // Map per-model `type` field (in PROVIDER_MODELS) to service kind.
 // Models without `type` are treated as LLM.
 const MODEL_TYPE_TO_KIND = {
@@ -514,6 +522,9 @@ export async function buildModelsList(kindFilter, options = {}) {
   for (const model of models) {
     if (!model?.id || seenModelIds.has(model.id)) continue;
     seenModelIds.add(model.id);
+    // Stamped here rather than at each push site so a new source of models
+    // cannot reintroduce an entry that fails SDK schema validation.
+    if (typeof model.created !== "number") model.created = MODEL_CREATED_EPOCH;
     dedupedModels.push(model);
   }
 
@@ -533,15 +544,103 @@ export async function OPTIONS() {
   });
 }
 
+// Optional passthrough catalogue.
+//
+// This endpoint is LLM-only by design (other kinds live at /v1/models/{kind}).
+// That is a problem when 9Router sits behind a gateway that ALSO fronts a
+// multi-modal upstream on the same base URL: callers list /v1/models and
+// legitimately expect everything reachable at that URL, including the TTS, STT
+// and embedding models this router does not route.
+//
+// Set UPSTREAM_MODELS_URL to that upstream's /v1/models to have its entries
+// merged in. Anything already advertised here wins, so the router's own ids
+// (and its combo names) are never shadowed. Unset = upstream behaviour,
+// unchanged.
+const UPSTREAM_MODELS_TTL_MS = 60_000;
+let _upstreamCache = { at: 0, data: [] };
+
+async function fetchUpstreamModels() {
+  const url = process.env.UPSTREAM_MODELS_URL;
+  if (!url) return [];
+  if (Date.now() - _upstreamCache.at < UPSTREAM_MODELS_TTL_MS) return _upstreamCache.data;
+  try {
+    const res = await fetch(url, {
+      // Same guard the router uses against another 9router: harmless to a
+      // non-9router upstream, and prevents a loop if this ever points at one.
+      headers: { [INTERNAL_MODELS_FETCH_HEADER]: "1" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return _upstreamCache.data;
+    const json = await res.json();
+    const data = Array.isArray(json?.data) ? json.data : [];
+    _upstreamCache = { at: Date.now(), data };
+    return data;
+  } catch {
+    // Discovery must not fail because the upstream is briefly unreachable;
+    // serve the last good list, or nothing.
+    return _upstreamCache.data;
+  }
+}
+
+/**
+ * Cheap answer to "could the list advertise a bare (slash-free) id equal to
+ * this?" without building the catalogue. Bare ids come from exactly two
+ * places: combo names (buildModelsList pushes combo.name for every kind) and
+ * the upstream catalogue (already TTL-cached). Everything else is
+ * `alias/model`. Used by /v1/models/{kind} to decide whether a slug request
+ * must first be tried as a retrieve, so kind listings do not pay for a full
+ * LLM pass -- with its live provider resolvers -- on every call.
+ */
+export async function bareIdExists(id) {
+  try {
+    if ((await getCombos()).some((c) => c?.name === id)) return true;
+  } catch {
+    // DB unavailable: the list falls back to static models with no combos,
+    // so there is no bare combo id to shadow either.
+  }
+  return (await fetchUpstreamModels()).some((m) => m?.id === id);
+}
+
+/**
+ * The catalogue GET /v1/models returns: 9Router's own LLM entries, then the
+ * upstream's, when configured. Exported so /v1/models/{id} resolves against
+ * the SAME set -- a retrieve that consults a different source than the list
+ * is how a client ends up with an id it was told exists and a 404 for it.
+ */
+export async function buildCatalogue({ skipDynamicFetch = false } = {}) {
+  const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+  if (skipDynamicFetch) return data;
+
+  const known = new Set(data.map((m) => m.id));
+  // Prefixed ids (gpu/qwen...) already cover the bare upstream id, so match
+  // on the suffix too or every model would be listed twice.
+  for (const id of [...known]) {
+    if (id.includes("/")) known.add(id.slice(id.indexOf("/") + 1));
+  }
+  for (const m of await fetchUpstreamModels()) {
+    // `created` defaulted for the same reason as in buildModelsList: the
+    // upstream is not obliged to send it, and one entry without it fails
+    // the SDK's validation of the entire list.
+    if (m?.id && !known.has(m.id)) data.push({
+      ...m,
+      owned_by: m.owned_by || "upstream",
+      created: typeof m.created === "number" ? m.created : MODEL_CREATED_EPOCH,
+    });
+  }
+  return data;
+}
+
 /**
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
+ * When UPSTREAM_MODELS_URL is set, that upstream's catalogue is merged in.
  */
 export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
-    const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
+    const data = await buildCatalogue({ skipDynamicFetch });
+
     return Response.json({ object: "list", data }, {
       headers: { "Access-Control-Allow-Origin": "*" },
     });
