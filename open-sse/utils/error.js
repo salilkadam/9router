@@ -2,13 +2,20 @@ import { ERROR_TYPES, DEFAULT_ERROR_MESSAGES } from "../config/errorConfig.js";
 
 /**
  * Build OpenAI-compatible error response body
+ *
+ * `param` is part of OpenAI's error object and is emitted always, null when no
+ * single request field is to blame. It is nullable but not optional in several
+ * clients' models, and omitting it costs a caller the one field that says WHICH
+ * input was rejected.
+ *
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
+ * @param {string|null} [param] - Request field the error is about, e.g. "model"
  * @returns {object} Error response object
  */
-export function buildErrorBody(statusCode, message) {
-  const errorInfo = ERROR_TYPES[statusCode] || 
-    (statusCode >= 500 
+export function buildErrorBody(statusCode, message, param = null) {
+  const errorInfo = ERROR_TYPES[statusCode] ||
+    (statusCode >= 500
       ? { type: "server_error", code: "internal_server_error" }
       : { type: "invalid_request_error", code: "" });
 
@@ -16,7 +23,8 @@ export function buildErrorBody(statusCode, message) {
     error: {
       message: message || DEFAULT_ERROR_MESSAGES[statusCode] || "An error occurred",
       type: errorInfo.type,
-      code: errorInfo.code
+      code: errorInfo.code,
+      param: param ?? null
     }
   };
 }
@@ -25,14 +33,21 @@ export function buildErrorBody(statusCode, message) {
  * Create error Response object (for non-streaming)
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
+ * @param {string|object|null} [paramOrHeaders] - Request field the error is about (e.g. "model"), or extra headers
+ * @param {object|null} [extraHeaders] - Extra headers when the 3rd arg is a param
  * @returns {Response} HTTP Response object
  */
-export function errorResponse(statusCode, message) {
-  return new Response(JSON.stringify(buildErrorBody(statusCode, message)), {
+export function errorResponse(statusCode, message, paramOrHeaders = null, extraHeaders = null) {
+  // 3rd arg: the request field the error is about (string, e.g. "model"), or an
+  // extra-headers object (upstream call style). Headers may also come 4th.
+  const param = typeof paramOrHeaders === "string" ? paramOrHeaders : null;
+  const headers = typeof paramOrHeaders === "string" ? extraHeaders : (paramOrHeaders ?? extraHeaders);
+  return new Response(JSON.stringify(buildErrorBody(statusCode, message, param)), {
     status: statusCode,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      ...headers
     }
   });
 }
@@ -95,13 +110,13 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs) {
+export function createErrorResult(statusCode, message, resetsAtMs, extraHeaders = null) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
-    response: errorResponse(statusCode, message)
+    response: errorResponse(statusCode, message, extraHeaders)
   };
 }
 
@@ -113,16 +128,20 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
  * @param {string} retryAfterHuman - Human-readable retry info e.g. "reset after 30s"
  * @returns {Response}
  */
-export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
+export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
   const msg = `${message} (${retryAfterHuman})`;
+  // Same envelope as every other error here: this used to emit `message` alone,
+  // so an SDK saw a 429 with no type and no code.
   return new Response(
-    JSON.stringify({ error: { message: msg } }),
+    JSON.stringify(buildErrorBody(statusCode, msg)),
     {
       status: statusCode,
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
-        "Retry-After": String(retryAfterSec)
+        // Intentionally mis-cased to prevent duplicate headers
+        "retry-after": String(retryAfterSec)
       }
     }
   );

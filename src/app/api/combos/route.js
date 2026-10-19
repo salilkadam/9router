@@ -5,6 +5,11 @@ export const dynamic = "force-dynamic";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
+// /v1/models/info is a static route Next dispatches ahead of the
+// /v1/models/{id} catch-all, so a combo of that name would be listed but
+// never retrievable. Kind slugs (tts, embedding, ...) need no reserving:
+// the catch-all resolves an exact id before falling back to a kind listing.
+const RESERVED_COMBO_NAMES = new Set(["info"]);
 
 // GET /api/combos - Get all combos
 export async function GET() {
@@ -25,6 +30,10 @@ export async function POST(request) {
 
     if (!name) {
       return NextResponse.json({ error: "Name is required" }, { status: 400 });
+    }
+
+    if (RESERVED_COMBO_NAMES.has(name)) {
+      return NextResponse.json({ error: `"${name}" is reserved: /v1/models/${name} is an endpoint` }, { status: 400 });
     }
 
     // Validate name format

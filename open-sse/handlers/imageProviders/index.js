@@ -12,6 +12,8 @@ import blackForestLabs from "./blackForestLabs.js";
 import runwayml from "./runwayml.js";
 import cloudflareAi from "./cloudflareAi.js";
 import antigravity from "./antigravity.js";
+import selfhostedImage from "./selfhostedImage.js";
+import selfhostedComfyui from "./selfhostedComfyui.js";
 
 const ADAPTERS = {
   openai: createOpenAIAdapter("openai"),
@@ -32,6 +34,8 @@ const ADAPTERS = {
   "black-forest-labs": blackForestLabs,
   runwayml,
   "cloudflare-ai": cloudflareAi,
+  "selfhosted-image": selfhostedImage,
+  "selfhosted-comfyui": selfhostedComfyui,
 };
 
 export function getImageAdapter(provider) {

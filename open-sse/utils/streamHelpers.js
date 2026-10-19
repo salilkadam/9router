@@ -1,4 +1,8 @@
 import { FORMATS } from "../translator/formats.js";
+import { buildErrorBody } from "./error.js";
+import { SSE_DONE } from "./sseConstants.js";
+
+const sharedEncoder = new TextEncoder();
 
 // Parse SSE data line
 export function parseSSELine(line, format = null) {
@@ -33,6 +37,33 @@ export function parseSSELine(line, format = null) {
   }
 }
 
+// Current vLLM (and OpenRouter) stream thinking as `delta.reasoning`; older vLLM, DeepSeek and
+// most clients use `delta.reasoning_content`. Move `reasoning` into `reasoning_content` so
+// downstream code (filters, translators, usage) and clients see it under the one name.
+// Move, not copy: clients that read both fields (Zed) concatenate them, so a mirrored chunk
+// rendered every thinking token twice -- and since the agent sends that thinking back as
+// history, the model then imitated the stutter in its own output (2x, 4x, 8x ...).
+// A `reasoning` identical to an existing `reasoning_content` is dropped for the same reason.
+// Returns true if the chunk was changed.
+export function normalizeOpenAIReasoningDelta(chunk) {
+  if (!Array.isArray(chunk?.choices)) return false;
+  let changed = false;
+  for (const choice of chunk.choices) {
+    const delta = choice?.delta;
+    if (!delta || typeof delta.reasoning !== "string") continue;
+    if (delta.reasoning_content === undefined || delta.reasoning_content === null) {
+      if (delta.reasoning === "") continue;
+      delta.reasoning_content = delta.reasoning;
+      delete delta.reasoning;
+      changed = true;
+    } else if (delta.reasoning_content === delta.reasoning) {
+      delete delta.reasoning;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // Check if chunk has valuable content (not empty)
 export function hasValuableContent(chunk, format) {
   // OpenAI format
@@ -40,6 +71,7 @@ export function hasValuableContent(chunk, format) {
     const delta = chunk.choices[0].delta;
     return delta.content && delta.content !== "" ||
            delta.reasoning_content && delta.reasoning_content !== "" ||
+           delta.reasoning && delta.reasoning !== "" ||
            delta.tool_calls && delta.tool_calls.length > 0 ||
            chunk.choices[0].finish_reason ||
            delta.role;
@@ -119,4 +151,25 @@ export function formatSSE(data, sourceFormat) {
   }
 
   return `data: ${JSON.stringify(data)}\n\n`;
+}
+
+// Terminal frames for a stream that aborted after HTTP 200 was already sent, so
+// the status code can no longer change. OpenAI-compatible clients (openai-python
+// raises APIError on any `data:` payload carrying an `error` key, checked before
+// [DONE]) need the error frame first, then [DONE]; Anthropic clients need
+// `event: error`. Never fabricate a successful finish_reason instead.
+//
+// Returns encoded bytes: onAbortTerminal callbacks are enqueued verbatim, same
+// as buildAbortedResponsesTerminalBytes.
+//
+// NOTE: non-SSE client formats (Ollama NDJSON) get an SSE frame here — dead in
+// practice because detectFormatByEndpoint never resolves to OLLAMA.
+export function buildStreamErrorBytes(statusCode, message, clientFormat) {
+  const { error } = buildErrorBody(statusCode, message);
+
+  const sse = clientFormat === FORMATS.CLAUDE
+    ? formatSSE({ type: "error", error }, FORMATS.CLAUDE)
+    : formatSSE({ error }, clientFormat) + SSE_DONE;
+
+  return sharedEncoder.encode(sse);
 }

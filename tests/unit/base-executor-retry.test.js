@@ -21,7 +21,7 @@ function makeExec(config) {
 
 const creds = { apiKey: "k" };
 
-beforeEach(() => fetchMock.mockReset());
+beforeEach(() => { fetchMock.mockReset(); });
 
 describe("BaseExecutor.execute — retry by status (config-driven)", () => {
   it("retries 502 `attempts` times then succeeds", async () => {
@@ -103,5 +103,61 @@ describe("BaseExecutor.execute — computeRetryDelay hook veto", () => {
     // hook vetoes retry → no fallback url → returns the 429 response as-is
     expect(out.response.status).toBe(429);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Upstream that never sends headers: settles only via the abort signal, like a
+// vLLM request queued past --max-num-seqs behind mcp-api-server. Per the Fetch
+// spec, fetch rejects with signal.reason — so abort(new Error(...)) surfaces as
+// that Error, not as an AbortError (only a reason-less abort() yields one).
+function hangUntilAborted(_url, opts) {
+  return new Promise((_, reject) => {
+    opts?.signal?.addEventListener("abort", () => reject(opts.signal.reason));
+  });
+}
+
+describe("BaseExecutor.execute — per-connection connect timeout (combo failover)", () => {
+  it("uses providerSpecificData.timeoutMs over the registry timeoutMs", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", timeoutMs: 10_000, retry: { 502: { attempts: 0 } } });
+    fetchMock.mockImplementation(hangUntilAborted);
+    const t0 = Date.now();
+    await expect(ex.execute({
+      model: "m", body: {}, stream: false,
+      credentials: { ...creds, providerSpecificData: { timeoutMs: 50 } },
+    })).rejects.toThrow(/connect timeout/);
+    expect(Date.now() - t0).toBeLessThan(2_000);
+  });
+
+  it("does not retry the same url after a connect timeout, even with 502 retries configured", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", retry: { 502: { attempts: 3, delayMs: 0 } } });
+    fetchMock.mockImplementation(hangUntilAborted);
+    await expect(ex.execute({
+      model: "m", body: {}, stream: false,
+      credentials: { ...creds, providerSpecificData: { timeoutMs: 50 } },
+    })).rejects.toThrow(/connect timeout/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a connect timeout as a plain Error, not an AbortError (chatCore maps AbortError to 499 = client gone)", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", retry: { 502: { attempts: 0 } } });
+    fetchMock.mockImplementation(hangUntilAborted);
+    let thrown = null;
+    try {
+      await ex.execute({ model: "m", body: {}, stream: false, credentials: { ...creds, providerSpecificData: { timeoutMs: 50 } } });
+    } catch (e) { thrown = e; }
+    expect(thrown).not.toBeNull();
+    expect(thrown.name).not.toBe("AbortError");
+  });
+
+  it("still propagates a caller abort (client disconnect) as AbortError", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", retry: { 502: { attempts: 0 } } });
+    fetchMock.mockImplementation(hangUntilAborted);
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 20);
+    let thrown = null;
+    try {
+      await ex.execute({ model: "m", body: {}, stream: false, signal: ctrl.signal, credentials: { ...creds, providerSpecificData: { timeoutMs: 5_000 } } });
+    } catch (e) { thrown = e; }
+    expect(thrown?.name).toBe("AbortError");
   });
 });
