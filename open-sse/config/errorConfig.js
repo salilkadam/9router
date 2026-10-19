@@ -69,6 +69,7 @@ const COOLDOWN = {
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
+  { provider: "codex", text: "model is not supported when using codex with a chatgpt account", cooldownMs: MAX_RATE_LIMIT_COOLDOWN_MS },
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   // Credential rejections that arrive as a 400 rather than 401 (xai returns
   // 400 for a bad key -- see src/app/api/providers/validate/route.js). These

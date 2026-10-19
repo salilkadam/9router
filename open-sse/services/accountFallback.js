@@ -1,4 +1,4 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, CLIENT_ERROR_STATUSES } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
 
 /**
  * Calculate exponential backoff cooldown for rate limits (429)
@@ -18,19 +18,23 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} status - HTTP status code
  * @param {string} errorText - Error message text
  * @param {number} backoffLevel - Current backoff level for exponential backoff
- * @param {{ scope?: "account"|"model" }} [opts] - "account" (default): the caller
- *   is deciding whether to lock this credential and rotate to another account;
- *   a request-level 4xx (CLIENT_ERROR_STATUSES) then means "do not". "model":
- *   the caller is a combo iterating models; a 4xx one member rejects may be
- *   fine for the next, so it keeps falling through.
+ * @param {string|{ scope?: "account"|"model", provider?: string }} [opts] - a
+ *   provider id (provider-scoped ERROR_RULES), or an options object. scope
+ *   "account" (default): the caller is deciding whether to lock this credential
+ *   and rotate to another account; a request-level 4xx then means "do not".
+ *   "model": the caller is a combo iterating models; a 4xx one member rejects
+ *   may be fine for the next, so it keeps falling through.
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0, { scope = "account" } = {}) {
+export function checkFallbackError(status, errorText, backoffLevel = 0, opts = null) {
+  // 4th arg: a provider id (upstream call style) or { scope, provider }.
+  const { scope = "account", provider = null } = typeof opts === "string" ? { provider: opts } : (opts || {});
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
 
   for (const rule of ERROR_RULES) {
+    if (rule.provider && rule.provider !== provider) continue;
     // Text-based rule: match substring in error message
     if (rule.text && lowerError && lowerError.includes(rule.text)) {
       if (rule.backoff) {
@@ -50,10 +54,19 @@ export function checkFallbackError(status, errorText, backoffLevel = 0, { scope 
     }
   }
 
-  // A client-side rejection no rule matched: the account is fine, hand the
-  // error back to the caller and do not touch the connection. A combo
-  // (scope "model") still tries its next member.
-  if (scope === "account" && CLIENT_ERROR_STATUSES.has(status)) {
+  // Request-scoped client errors that matched no rule above: a 400 caused by the
+  // request itself (context overflow, malformed body, unsupported parameter) says
+  // nothing about the credential, so cooling the account down only removes a
+  // healthy connection from rotation. With a single connection it is worse: every
+  // later request in the window fails with a copy of this very error
+  // ("all 1 accounts locked for <model> | lastError=[400]: ..."), which hides the
+  // real cause from the caller and makes unrelated sessions look like they hit the
+  // same limit. Hand the upstream error back for this request instead.
+  // Account-scoped statuses keep their rules above (401/402/403/404/429), and the
+  // text rules still win for rate-limit / quota / capacity wording.
+  // A combo (scope "model") still tries its next member: a 400 one member rejects
+  // (e.g. a context window too small for this prompt) may be fine for the next.
+  if (scope === "account" && status >= 400 && status < 500 && status !== 401 && status !== 402 && status !== 403 && status !== 429) {
     return { shouldFallback: false, cooldownMs: 0 };
   }
 
