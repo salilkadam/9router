@@ -150,7 +150,8 @@ describe("403 response shape", () => {
     expect(r.status).toBe(403);
     expect(r.headers.get("content-type")).toContain("application/json");
     const body = await r.json();
-    expect(body).toEqual({ error: { message: keyAccessDeniedMessage("openai/model-a"), type: expect.any(String), code: expect.any(String) } });
+    // param: null -- this fork always sends the full OpenAI envelope (SDK compatibility).
+    expect(body).toEqual({ error: { message: keyAccessDeniedMessage("openai/model-a"), type: expect.any(String), code: expect.any(String), param: null } });
     expect(JSON.stringify(body)).not.toContain("key-b"); // no key name
     expect(JSON.stringify(body)).not.toContain("MODEL-B"); // no allow list
   });

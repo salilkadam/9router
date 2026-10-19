@@ -4,11 +4,16 @@ const mocks = vi.hoisted(() => ({
   buildModelsList: vi.fn(),
 }));
 
+// The retrieve route resolves LLM ids through buildCatalogue (the same list
+// GET /v1/models serves) and checks bare-id/kind-slug collisions with
+// bareIdExists; both are routed through the one mocked list here.
 vi.mock("../../src/app/api/v1/models/route.js", () => ({
   buildModelsList: mocks.buildModelsList,
+  buildCatalogue: () => mocks.buildModelsList(["llm"]),
+  bareIdExists: async () => false,
 }));
 
-const { GET } = await import("../../src/app/api/v1/models/[...model]/route.js");
+const { GET } = await import("../../src/app/api/v1/models/[...path]/route.js");
 
 const chatModel = {
   id: "cc/claude-sonnet-5",
@@ -18,7 +23,7 @@ const chatModel = {
 };
 
 function params(model) {
-  return { params: Promise.resolve({ model }) };
+  return { params: Promise.resolve({ path: model }) };
 }
 
 describe("GET /v1/models/{id}", () => {

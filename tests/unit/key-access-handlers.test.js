@@ -55,7 +55,7 @@ const { handleFetch } = await import("../../src/sse/handlers/fetch.js");
 const { handleSystemone } = await import("../../src/sse/handlers/systemone.js");
 const geminiRoute = await import("../../src/app/api/v1beta/models/[...path]/route.js");
 const modelsRoute = await import("../../src/app/api/v1/models/route.js");
-const modelsKindRoute = await import("../../src/app/api/v1/models/[...model]/route.js");
+const modelsKindRoute = await import("../../src/app/api/v1/models/[...path]/route.js");
 
 const enc = new TextEncoder();
 const sse = (frames) => new Response(new ReadableStream({
@@ -222,7 +222,7 @@ describe("/v1/models routes filter by key", () => {
     expect(await list(null)).toEqual(all); // no key: unchanged (middleware governs remote access)
   });
   it("/v1/models/{kind} and single-model lookup are filtered too", async () => {
-    const kind = async (k, path) => modelsKindRoute.GET(new Request(`http://localhost/v1/models/${path.join("/")}`, { headers: auth(k) }), { params: Promise.resolve({ model: path }) });
+    const kind = async (k, path) => modelsKindRoute.GET(new Request(`http://localhost/v1/models/${path.join("/")}`, { headers: auth(k) }), { params: Promise.resolve({ path }) });
     const emb = await (await kind("sk-open", ["embedding"])).json();
     expect(emb.data.length).toBeGreaterThan(0);
     expect((await (await kind("sk-empty", ["embedding"])).json()).data).toEqual([]);

@@ -93,10 +93,12 @@ describe("buildStreamErrorBytes", () => {
     expect(out).toContain('data: {"error"');
     expect(out.indexOf("data: [DONE]")).toBeGreaterThan(out.indexOf('data: {"error"'));
 
+    // param: null -- this fork always sends the full OpenAI envelope (SDK compatibility).
     expect(jsonOf(out).error).toEqual({
       message: "stream stall timeout",
       type: "server_error",
       code: "gateway_timeout",
+      param: null,
     });
   });
 

@@ -9,6 +9,11 @@ const call = (segments) => GET(undefined, { params: Promise.resolve({ path: segm
 // fetch, and the two answer with the same object. Behind a gateway that fronted
 // list and retrieve with DIFFERENT services, half the listed ids 404'd on
 // retrieve. Both now resolve from buildCatalogue, and this pins that.
+// These two walk the WHOLE catalogue (~820 ids since v0.5.104 lists the no-auth
+// free providers), and each retrieve rebuilds it (~80ms, same cost as upstream's
+// own buildModelsList), so they need more than vitest's 5s default.
+const EXHAUSTIVE_TIMEOUT_MS = 180_000;
+
 describe("GET /v1/models/{id} agrees with GET /v1/models", () => {
   it("retrieves every listed id and returns the same object", async () => {
     const listed = await buildCatalogue();
@@ -18,7 +23,7 @@ describe("GET /v1/models/{id} agrees with GET /v1/models", () => {
       expect(res.status, m.id).toBe(200);
       expect(await res.json()).toEqual(m);
     }
-  });
+  }, EXHAUSTIVE_TIMEOUT_MS);
 
   it("retrieves models advertised only under a per-kind listing, through GET", async () => {
     const kinds = await buildModelsList(["tts", "stt", "embedding", "image"]);
@@ -28,7 +33,7 @@ describe("GET /v1/models/{id} agrees with GET /v1/models", () => {
       expect(res.status, m.id).toBe(200);
       expect(await res.json()).toEqual(m);
     }
-  });
+  }, EXHAUSTIVE_TIMEOUT_MS);
 
   // Next's route matcher hands the handler already-decoded segments. A second
   // decodeURIComponent turned any id holding a literal "%" (custom-model ids

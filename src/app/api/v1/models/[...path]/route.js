@@ -1,4 +1,5 @@
 import { bareIdExists, buildCatalogue, buildModelsList } from "../route.js";
+import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
 
 // URL slug → service kind(s). `web` covers both webSearch and webFetch.
 const KIND_SLUG_MAP = {
@@ -65,12 +66,19 @@ export async function findModel(id) {
  * Segments arrive already percent-decoded (Next's route matcher decodes each
  * catch-all entry), so they are joined as-is; decoding again turned a listed
  * id containing a literal "%" into a 500.
+ *
+ * A key restricted by per-key access control sees only what it may call:
+ * kind listings are filtered, and a retrieve outside its allow-list answers
+ * the same 404 as an unknown id (no existence leak). Unrestricted and keyless
+ * requests are unaffected (the access context is null).
  */
-export async function GET(_request, { params }) {
+export async function GET(request, { params }) {
   try {
     const { path } = await params;
     const segments = Array.isArray(path) ? path : [path];
     const id = segments.join("/");
+    const keyAccess = await getKeyAccessContext(request);
+    const visible = async (m) => (m ? (await filterModelsListForKey(keyAccess, [m]))[0] || null : null);
 
     const kindFilter = segments.length === 1 ? KIND_SLUG_MAP[segments[0]] : undefined;
     if (kindFilter) {
@@ -79,14 +87,14 @@ export async function GET(_request, { params }) {
       // are ever bare, and bareIdExists checks those without building a
       // catalogue; the full resolve runs only when there is a collision.
       if (await bareIdExists(id)) {
-        const shadowing = await findModel(id);
+        const shadowing = await visible(await findModel(id));
         if (shadowing) return Response.json(shadowing, { headers: CORS });
       }
-      const data = await buildModelsList(kindFilter);
+      const data = await filterModelsListForKey(keyAccess, await buildModelsList(kindFilter));
       return Response.json({ object: "list", data }, { headers: CORS });
     }
 
-    const model = await findModel(id);
+    const model = await visible(await findModel(id));
     if (model) return Response.json(model, { headers: CORS });
 
     // OpenAI's own body for an unknown model: message, type, param null and
