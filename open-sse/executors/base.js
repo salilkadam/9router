@@ -131,9 +131,12 @@ export class BaseExecutor {
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
-      // Abort if upstream doesn't return response headers within connection timeout
+      // Abort if upstream doesn't return response headers within connection timeout.
+      // A connection's providerSpecificData.timeoutMs wins over the registry value:
+      // custom openai-compatible nodes share PROVIDERS.openai as config, so this is
+      // the only place a per-connection time-to-first-byte budget can be set.
       const connectCtrl = new AbortController();
-      const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
+      const timeoutMs = Number(credentials?.providerSpecificData?.timeoutMs) || this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
       const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
       const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
 
@@ -164,10 +167,21 @@ export class BaseExecutor {
       } catch (error) {
         clearTimeout(connectTimer);
         lastError = error;
-        const isConnectTimeout = connectCtrl.signal.aborted && error.name === "AbortError";
+        // Our timer fired and the caller did not abort. Don't key on error.name: fetch
+        // rejects with the abort *reason* (the Error above), not with an AbortError.
+        const isConnectTimeout = connectCtrl.signal.aborted && !signal?.aborted;
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${error.name}: ${error.message}${isConnectTimeout ? " (connect timeout)" : ""}`);
-        // Connect timeout is internal — convert to retryable network error, don't propagate AbortError
+        // Connect timeout is internal — convert to a plain network error, don't propagate AbortError
+        // (chatCore reads AbortError as "client went away" and answers 499 instead of falling back).
         if (error.name === "AbortError" && !isConnectTimeout) throw error;
+        if (isConnectTimeout) {
+          // The upstream burned the whole budget without sending headers (e.g. a saturated
+          // queue); retrying the same URL only multiplies the stall. Move to the next URL,
+          // or hand the error to the combo so it tries its next member.
+          lastError = new Error(`fetch connect timeout after ${timeoutMs}ms`);
+          if (urlIndex + 1 < fallbackCount) continue;
+          throw lastError;
+        }
 
         // Map network/fetch exceptions to 502 retry config
         if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`)) { urlIndex--; continue; }
